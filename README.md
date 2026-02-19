@@ -20,7 +20,7 @@ The official browser companion for **JDA**, a high-performance download accelera
 
 ### For Users
 
-*Coming soon to the Chrome Web Store.*
+*Chrome Web Store requires you to pay $5 as one time fee. I neither have an international card nor do i have money : \(*
 
 ## Project Structure
 
