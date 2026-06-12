@@ -1,53 +1,337 @@
-chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  chrome.storage.local.get(['jdaEnabled'], (result) => {
-    const isEnabled = result.hasOwnProperty('jdaEnabled') ? result.jdaEnabled : true;
+const JDA_ENDPOINT = "http://127.0.0.1:14732/download";
+const REQUEST_TTL_MS = 2 * 60 * 1000;
+const FALLBACK_INTERCEPT_DELAY_MS = 500;
 
-    if (!isEnabled) {
-      suggest(); 
-      return;
+const requestsById = new Map();
+const requestsByUrl = new Map();
+const handledDownloadIds = new Set();
+
+function normalizeUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return url || "";
+  }
+}
+
+function headerArrayToObject(headers = []) {
+  const result = {};
+
+  for (const header of headers) {
+    if (!header.name) continue;
+    result[header.name.toLowerCase()] = header.value || "";
+  }
+
+  return result;
+}
+
+function getHeader(headers, name) {
+  return headers?.[name.toLowerCase()] || "";
+}
+
+function parseContentRange(value) {
+  if (!value) return 0;
+
+  const match = value.match(/bytes\s+\d+-\d+\/(\d+|\*)/i);
+  if (!match || match[1] === "*") return 0;
+
+  const total = Number.parseInt(match[1], 10);
+  return Number.isFinite(total) ? total : 0;
+}
+
+function parseContentLength(value) {
+  if (!value) return 0;
+
+  const size = Number.parseInt(value, 10);
+  return Number.isFinite(size) && size > 0 ? size : 0;
+}
+
+function isResumeSupported(record) {
+  const responseHeaders = record?.responseHeaders || {};
+  const acceptRanges = getHeader(responseHeaders, "accept-ranges").toLowerCase();
+  const contentRange = getHeader(responseHeaders, "content-range").toLowerCase();
+
+  return (
+    record?.statusCode === 206 ||
+    acceptRanges.includes("bytes") ||
+    contentRange.startsWith("bytes")
+  );
+}
+
+function getSize(record, item) {
+  const responseHeaders = record?.responseHeaders || {};
+  const contentRangeSize = parseContentRange(getHeader(responseHeaders, "content-range"));
+
+  if (contentRangeSize > 0) return contentRangeSize;
+  if (item?.fileSize && item.fileSize > 0) return item.fileSize;
+  if (item?.totalBytes && item.totalBytes > 0) return item.totalBytes;
+
+  return parseContentLength(getHeader(responseHeaders, "content-length"));
+}
+
+function cleanupOldRequests() {
+  const cutoff = Date.now() - REQUEST_TTL_MS;
+
+  for (const [requestId, record] of requestsById.entries()) {
+    if (record.seenAt < cutoff) requestsById.delete(requestId);
+  }
+
+  for (const [url, records] of requestsByUrl.entries()) {
+    const fresh = records.filter((record) => record.seenAt >= cutoff);
+    if (fresh.length > 0) requestsByUrl.set(url, fresh);
+    else requestsByUrl.delete(url);
+  }
+}
+
+function rememberRequest(details) {
+  if (!details.url || details.method !== "GET") return;
+
+  cleanupOldRequests();
+
+  const url = normalizeUrl(details.url);
+  const requestHeaders = headerArrayToObject(details.requestHeaders);
+  const record = {
+    requestId: details.requestId,
+    url,
+    originalUrl: details.url,
+    method: details.method,
+    tabId: details.tabId,
+    type: details.type,
+    initiator: details.initiator || "",
+    seenAt: Date.now(),
+    requestHeaders,
+    responseHeaders: {},
+    statusCode: 0
+  };
+
+  requestsById.set(details.requestId, record);
+
+  const records = requestsByUrl.get(url) || [];
+  records.push(record);
+  requestsByUrl.set(url, records.slice(-12));
+}
+
+function rememberResponse(details) {
+  const record = requestsById.get(details.requestId);
+  if (!record) return;
+
+  record.responseHeaders = headerArrayToObject(details.responseHeaders);
+  record.statusCode = details.statusCode || 0;
+  record.seenAt = Date.now();
+}
+
+function findRequestForDownload(item) {
+  cleanupOldRequests();
+
+  const candidates = [item.finalUrl, item.url]
+    .filter(Boolean)
+    .map(normalizeUrl);
+
+  for (const url of candidates) {
+    const records = requestsByUrl.get(url);
+    if (records?.length) return records[records.length - 1];
+  }
+
+  if (item.referrer) {
+    const itemTime = item.startTime ? new Date(item.startTime).getTime() : Date.now();
+    let best = null;
+
+    for (const records of requestsByUrl.values()) {
+      for (const record of records) {
+        if (Math.abs(record.seenAt - itemTime) > REQUEST_TTL_MS) continue;
+        if (!best || record.seenAt > best.seenAt) best = record;
+      }
     }
 
-    chrome.downloads.cancel(item.id);
-    chrome.downloads.erase({ id: item.id });
+    if (best) return best;
+  }
 
-    // Extract the cookies for the specific download URL
-    const targetUrl = item.finalUrl || item.url;
-    chrome.cookies.getAll({ url: targetUrl }, (cookies) => {
-      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-      
-      // Determine the Referer. Since we're in a background service worker, item doesn't have referer directly.
-      // But we can usually grab it from the active tab if it matches, or from the item.referrer.
-      const referer = item.referrer || "";
+  return null;
+}
 
-      const payload = {
-        url: targetUrl,
-        name: item.filename,
-        size: item.fileSize || 0,
-        resume: (item.canResume || (item.fileSize > 0)) ? "true" : "false",
-        cookie: cookieStr,
-        userAgent: navigator.userAgent,
-        referer: referer
-      };
+function sanitizeHeadersForJda(headers) {
+  const blocked = new Set([
+    "host",
+    "connection",
+    "content-length",
+    "accept-encoding",
+    "range"
+  ]);
 
-      fetch("http://127.0.0.1:14732/download", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      }).then(res => {
-        if (!res.ok) {
-            console.error("JDA server responded with an error");
-            // Optionally fallback to deep link if the server is off
-        }
-      }).catch(err => {
-        console.error("Failed to connect to JDA local server. Is JDA running?", err);
-        // Fallback to deep link if the local server is totally unreachable
-        const params = new URLSearchParams(payload);
-        chrome.tabs.update({ url: "jda://" + "?" + params.toString() });
-      });
+  const result = {};
+
+  for (const [name, value] of Object.entries(headers || {})) {
+    const lowerName = name.toLowerCase();
+    if (!value || blocked.has(lowerName)) continue;
+    result[lowerName] = value;
+  }
+
+  return result;
+}
+
+function getCookiesForUrl(url) {
+  return new Promise((resolve) => {
+    chrome.cookies.getAll({ url }, (cookies) => {
+      if (chrome.runtime.lastError) {
+        resolve("");
+        return;
+      }
+
+      resolve(cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; "));
     });
   });
+}
 
-  return true; // Required to keep the message channel open for async operations
+function getStorage(keys) {
+  return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
+}
+
+function setStorage(value) {
+  return new Promise((resolve) => chrome.storage.local.set(value, resolve));
+}
+
+function downloadsSearch(query) {
+  return new Promise((resolve) => chrome.downloads.search(query, resolve));
+}
+
+function cancelDownload(id) {
+  return new Promise((resolve) => chrome.downloads.cancel(id, resolve));
+}
+
+function eraseDownload(id) {
+  return new Promise((resolve) => chrome.downloads.erase({ id }, resolve));
+}
+
+async function isEnabled() {
+  const result = await getStorage(["jdaEnabled"]);
+  return Object.prototype.hasOwnProperty.call(result, "jdaEnabled") ? result.jdaEnabled : true;
+}
+
+async function setStatus(status, detail = "") {
+  await setStorage({
+    jdaLastStatus: status,
+    jdaLastDetail: detail,
+    jdaLastAt: new Date().toLocaleTimeString()
+  });
+}
+
+async function sendToJda(payload) {
+  const response = await fetch(JDA_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) throw new Error(`JDA returned HTTP ${response.status}`);
+}
+
+function openDeepLinkFallback(payload) {
+  const params = new URLSearchParams();
+
+  params.set("url", payload.url || "");
+  params.set("name", payload.name || "");
+  params.set("size", String(payload.size || 0));
+  params.set("resume", payload.resume || "false");
+  params.set("cookie", payload.cookie || "");
+  params.set("userAgent", payload.userAgent || "");
+  params.set("referer", payload.referer || "");
+
+  chrome.tabs.create({ url: `jda://?${params.toString()}` });
+}
+
+async function buildPayload(item) {
+  const targetUrl = item.finalUrl || item.url;
+  const record = findRequestForDownload(item);
+  const requestHeaders = record?.requestHeaders || {};
+  const headerCookie = getHeader(requestHeaders, "cookie");
+  const cookie = headerCookie || await getCookiesForUrl(targetUrl);
+  const userAgent = getHeader(requestHeaders, "user-agent") || navigator.userAgent;
+  const referer = getHeader(requestHeaders, "referer") || item.referrer || "";
+
+  return {
+    url: targetUrl,
+    name: item.filename || "download",
+    size: getSize(record, item),
+    resume: isResumeSupported(record) ? "true" : "false",
+    cookie,
+    userAgent,
+    referer,
+    headers: sanitizeHeadersForJda({
+      ...requestHeaders,
+      cookie,
+      "user-agent": userAgent,
+      referer
+    })
+  };
+}
+
+async function handOffDownload(item, source) {
+  if (!item?.id || handledDownloadIds.has(item.id)) return;
+  if (!item.url && !item.finalUrl) return;
+  if (!(await isEnabled())) return;
+
+  handledDownloadIds.add(item.id);
+
+  try {
+    const payload = await buildPayload(item);
+    await sendToJda(payload);
+    await cancelDownload(item.id);
+    await eraseDownload(item.id);
+    await setStatus("Caught download", `${payload.name} (${source})`);
+  } catch (error) {
+    handledDownloadIds.delete(item.id);
+    await setStatus("JDA handoff failed", error?.message || String(error));
+
+    try {
+      const payload = await buildPayload(item);
+      openDeepLinkFallback(payload);
+    } catch {
+      // Keep the browser download alive if we cannot build a payload.
+    }
+  }
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
+  const result = await getStorage(["jdaEnabled"]);
+  if (!Object.prototype.hasOwnProperty.call(result, "jdaEnabled")) {
+    await setStorage({ jdaEnabled: true });
+  }
+  await setStatus("Ready", "Waiting for downloads");
+});
+
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  rememberRequest,
+  { urls: ["<all_urls>"] },
+  ["requestHeaders", "extraHeaders"]
+);
+
+chrome.webRequest.onHeadersReceived.addListener(
+  rememberResponse,
+  { urls: ["<all_urls>"] },
+  ["responseHeaders", "extraHeaders"]
+);
+
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  isEnabled().then((enabled) => {
+    suggest({
+      filename: item.filename || "download",
+      conflictAction: "uniquify"
+    });
+
+    if (enabled) handOffDownload(item, "filename");
+  });
+
+  return true;
+});
+
+chrome.downloads.onCreated.addListener((item) => {
+  setTimeout(async () => {
+    if (handledDownloadIds.has(item.id) || !(await isEnabled())) return;
+
+    const matches = await downloadsSearch({ id: item.id });
+    const current = matches?.[0] || item;
+    await handOffDownload(current, "created-fallback");
+  }, FALLBACK_INTERCEPT_DELAY_MS);
 });

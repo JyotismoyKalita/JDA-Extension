@@ -1,17 +1,22 @@
 {
   "manifest_version": 3,
   "name": "JDA - Jyotismoy's Download Accelerator",
-  "version": "0.1.0",
-  "description": "Intercepts and accelerates downloads using JDA.",
+  "version": "0.3.0",
+  "description": "Intercepts browser downloads and sends authenticated request details to JDA.",
   "permissions": [
     "downloads",
     "storage",
     "cookies",
-    "tabs"
+    "tabs",
+    "webRequest"
   ],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1:14732/*"
+  ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
     "default_popup": "popup.html",
