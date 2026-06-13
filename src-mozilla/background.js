@@ -171,44 +171,34 @@ function sanitizeHeadersForJda(headers) {
   return result;
 }
 
-function getCookiesForUrl(url) {
-  return new Promise((resolve) => {
-    try {
-      chrome.cookies.getAll({ url }, (cookies) => {
-        if (chrome.runtime.lastError) {
-          resolve("");
-          return;
-        }
-        if (!cookies) {
-          resolve("");
-          return;
-        }
-        resolve(cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; "));
-      });
-    } catch {
-      resolve("");
-    }
-  });
+async function getCookiesForUrl(url) {
+  try {
+    const cookies = await browser.cookies.getAll({ url });
+    if (!cookies) return "";
+    return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+  } catch {
+    return "";
+  }
 }
 
-function getStorage(keys) {
-  return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
+async function getStorage(keys) {
+  return await browser.storage.local.get(keys);
 }
 
-function setStorage(value) {
-  return new Promise((resolve) => chrome.storage.local.set(value, resolve));
+async function setStorage(value) {
+  return await browser.storage.local.set(value);
 }
 
-function downloadsSearch(query) {
-  return new Promise((resolve) => chrome.downloads.search(query, resolve));
+async function downloadsSearch(query) {
+  return await browser.downloads.search(query);
 }
 
-function cancelDownload(id) {
-  return new Promise((resolve) => chrome.downloads.cancel(id, resolve));
+async function cancelDownload(id) {
+  return await browser.downloads.cancel(id);
 }
 
-function eraseDownload(id) {
-  return new Promise((resolve) => chrome.downloads.erase({ id }, resolve));
+async function eraseDownload(id) {
+  return await browser.downloads.erase({ id });
 }
 
 async function isEnabled() {
@@ -234,7 +224,7 @@ async function sendToJda(payload) {
   if (!response.ok) throw new Error(`JDA returned HTTP ${response.status}`);
 }
 
-function openDeepLinkFallback(payload) {
+async function openDeepLinkFallback(payload) {
   const params = new URLSearchParams();
 
   params.set("url", payload.url || "");
@@ -245,7 +235,7 @@ function openDeepLinkFallback(payload) {
   params.set("userAgent", payload.userAgent || "");
   params.set("referer", payload.referer || "");
 
-  chrome.tabs.create({ url: `jda://?${params.toString()}` });
+  await browser.tabs.create({ url: `jda://?${params.toString()}` });
 }
 
 async function buildPayload(item) {
@@ -293,14 +283,14 @@ async function handOffDownload(item, source) {
 
     try {
       const payload = await buildPayload(item);
-      openDeepLinkFallback(payload);
+      await openDeepLinkFallback(payload);
     } catch {
       // Keep the browser download alive if we cannot build a payload.
     }
   }
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+browser.runtime.onInstalled.addListener(async () => {
   const result = await getStorage(["jdaEnabled"]);
   if (!Object.prototype.hasOwnProperty.call(result, "jdaEnabled")) {
     await setStorage({ jdaEnabled: true });
@@ -308,20 +298,20 @@ chrome.runtime.onInstalled.addListener(async () => {
   await setStatus("Ready", "Waiting for downloads");
 });
 
-chrome.webRequest.onBeforeSendHeaders.addListener(
+browser.webRequest.onBeforeSendHeaders.addListener(
   rememberRequest,
   { urls: ["<all_urls>"] },
-  ["requestHeaders", "extraHeaders"]
+  ["requestHeaders"]
 );
 
-chrome.webRequest.onHeadersReceived.addListener(
+browser.webRequest.onHeadersReceived.addListener(
   rememberResponse,
   { urls: ["<all_urls>"] },
-  ["responseHeaders", "extraHeaders"]
+  ["responseHeaders"]
 );
 
-if (chrome.downloads.onDeterminingFilename) {
-  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+if (browser.downloads.onDeterminingFilename) {
+  browser.downloads.onDeterminingFilename.addListener((item, suggest) => {
     isEnabled().then((enabled) => {
       suggest({
         filename: item.filename || "download",
@@ -335,13 +325,17 @@ if (chrome.downloads.onDeterminingFilename) {
   });
 }
 
-chrome.downloads.onCreated.addListener((item) => {
-  const delay = chrome.downloads.onDeterminingFilename ? FALLBACK_INTERCEPT_DELAY_MS : 50;
+browser.downloads.onCreated.addListener((item) => {
+  const delay = browser.downloads.onDeterminingFilename ? FALLBACK_INTERCEPT_DELAY_MS : 50;
   setTimeout(async () => {
     if (handledDownloadIds.has(item.id) || !(await isEnabled())) return;
 
-    const matches = await downloadsSearch({ id: item.id });
-    const current = matches?.[0] || item;
-    await handOffDownload(current, "created-fallback");
+    try {
+      const matches = await downloadsSearch({ id: item.id });
+      const current = matches?.[0] || item;
+      await handOffDownload(current, "created-fallback");
+    } catch (error) {
+      console.error("Error handling onCreated in JDA extension:", error);
+    }
   }, delay);
 });

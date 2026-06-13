@@ -6,17 +6,27 @@ The official browser companion for **JDA**, a high-performance download accelera
 
 * **Smart Interception:** Automatically catches download requests and hands them over to the JDA desktop client.
 * **On/Off Toggle:** A simple popup interface to enable or disable acceleration on the fly.
-* **Deep Link Integration:** Communicates with the JDA app using the custom `jda://` protocol.
+* **Local Server Integration:** Sends download request details directly to the local server started by the JDA desktop app (at `http://127.0.0.1:14732/download`) via HTTP POST requests.
+* **Deep Link Fallback:** Automatically falls back to using the custom `jda://` protocol deep link if the local HTTP server is unreachable.
 * **Persistence:** Remembers your preferences across browser sessions using `chrome.storage`.
 
 ## Installation
 
 ### For Developers (Unpacked)
 
+#### Chrome / Edge / Brave / Opera (Chromium)
+
 1. Clone this repository.
-2. Open Chrome/Edge and navigate to `chrome://extensions`.
+2. Open the browser and navigate to `chrome://extensions`.
 3. Enable **Developer Mode** in the top right corner.
 4. Click **Load unpacked** and select the `src` folder.
+
+#### Firefox (Gecko)
+
+1. Clone this repository.
+2. Open Firefox and navigate to `about:debugging#/runtime/this-firefox`.
+3. Click **Load Temporary Add-on...** on the right side.
+4. Select the `manifest.json` file inside the `src-mozilla` folder.
 
 ### For Users
 
@@ -29,7 +39,15 @@ The official browser companion for **JDA**, a high-performance download accelera
 ├── .gitignore
 ├── README.md
 ├── LICENSE
-└───src/
+├───src/               # Chromium extension source files
+│   ├── background.js
+│   ├── manifest.json
+│   ├── popup.css
+│   ├── popup.html
+│   ├── popup.js
+│   └───icons/
+│       └── icon128.png
+└───src-mozilla/       # Firefox extension source files
     ├── background.js
     ├── manifest.json
     ├── popup.css
