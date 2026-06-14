@@ -291,6 +291,8 @@ async function handOffDownload(item, source) {
     try {
       const payload = await buildPayload(item);
       await openDeepLinkFallback(payload);
+      await cancelDownload(item.id);
+      await eraseDownload(item.id);
     } catch {
       // Keep the browser download alive if we cannot build a payload.
     }
