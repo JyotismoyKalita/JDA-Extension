@@ -278,7 +278,14 @@ async function handOffDownload(item, source) {
   if (!item?.id || handledDownloadIds.has(item.id)) return;
   if (!item.url && !item.finalUrl) return;
   if (!(await isEnabled())) return;
+  if (item.state && item.state !== "in_progress") return;
 
+  if (item.startTime) {
+    const startTime = new Date(item.startTime).getTime();
+    if (Date.now() - startTime > 15 * 1000) {
+      return;
+    }
+  }
   handledDownloadIds.add(item.id);
 
   try {
