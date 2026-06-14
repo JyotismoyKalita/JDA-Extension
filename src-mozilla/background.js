@@ -317,23 +317,7 @@ browser.webRequest.onHeadersReceived.addListener(
   ["responseHeaders"]
 );
 
-if (browser.downloads.onDeterminingFilename) {
-  browser.downloads.onDeterminingFilename.addListener((item, suggest) => {
-    isEnabled().then((enabled) => {
-      suggest({
-        filename: item.filename || "download",
-        conflictAction: "uniquify"
-      });
-
-      if (enabled) handOffDownload(item, "filename");
-    });
-
-    return true;
-  });
-}
-
 browser.downloads.onCreated.addListener((item) => {
-  const delay = browser.downloads.onDeterminingFilename ? FALLBACK_INTERCEPT_DELAY_MS : 50;
   setTimeout(async () => {
     if (handledDownloadIds.has(item.id) || !(await isEnabled())) return;
 
@@ -344,5 +328,5 @@ browser.downloads.onCreated.addListener((item) => {
     } catch (error) {
       console.error("Error handling onCreated in JDA extension:", error);
     }
-  }, delay);
+  }, 50);
 });
